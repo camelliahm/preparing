@@ -1,5 +1,5 @@
-#include "My_Comm.h"  
-#include "Drv_Uart.h"                 
+#include "My_Comm.h"
+#include "Drv_Uart.h"                   
 
 Ground_Data_TypeDef ground_data;
 Vision_Track_Data vision_data;
@@ -102,15 +102,11 @@ void My_Comm_ReceiveByte(u8 data)
             {
                 if (frame_type == ANO_GROUND_FRAME)
                 {
-                    memcpy(ground_data.NoFly_Zone1, &rx_buf[4], 4);
-                    memcpy(ground_data.NoFly_Zone2, &rx_buf[8], 4);
-                    memcpy(ground_data.NoFly_Zone3, &rx_buf[12], 4);
-                    ground_data.update_flag ++;
+
                 }
                 else if (frame_type == ANO_VISION_FRAME)
                 {
-                    vision_data.animal_number = rx_buf[4];
-                    vision_data.animal_count = rx_buf[5];
+                    vision_data.number = rx_buf[4];
                 }
             }
             else
@@ -142,13 +138,15 @@ void My_Comm_ReceiveByte(u8 data)
 }
 
 /**
- * @brief  匿名协议 F4帧 通用发送接口
+ * @brief  匿名协议 灵活帧 通用发送接口
  * @note   纯协议层，数据由外部传入，自动组帧+校验+串口1发送
  * @param  *data_buf：要发送的 数据区 指针
  * @param  data_len：数据区长度（0~20字节均可）
+ * @param  frame:功能码
+ * @param  (*DrvUartSendBuf)(unsigned char *, u8)：对应调用的发送的串口发送函数
  * @retval 无
  */
-void ANO_Send_Custom_F4(u8 *data_buf, u8 data_len)
+void ANO_Send_Custom(u8 *data_buf, u8 data_len, u8 frame, void (*DrvUartSendBuf)(unsigned char *, u8))
 {
     u8 frame_buf[32];
     u8 frame_len = 0;
@@ -157,7 +155,7 @@ void ANO_Send_Custom_F4(u8 *data_buf, u8 data_len)
     // 组帧
     frame_buf[frame_len++] = 0xAA;  // 帧头0xAA
     frame_buf[frame_len++] = 0xFF;  // 目标地址0xFF
-    frame_buf[frame_len++] = ANO_GROUND_FRAME;  // 功能码0xF4
+    frame_buf[frame_len++] = frame;  // 功能码0xF4
     frame_buf[frame_len++] = data_len;
     
     // 数据区
@@ -174,5 +172,5 @@ void ANO_Send_Custom_F4(u8 *data_buf, u8 data_len)
     frame_buf[frame_len++] = addcheck;
 
     // 发送
-    DrvUart2SendBuf(frame_buf, frame_len);
+    DrvUartSendBuf(frame_buf, frame_len);
 }

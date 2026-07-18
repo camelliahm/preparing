@@ -21,6 +21,7 @@ typedef struct
     float final_y;        // 最终目标Y
     float smooth_speed;   // 平滑移动速度 (cm/s)
     uint8_t smoothing_active; // 平滑过程激活标志
+    uint8_t mode_flags;      // 平滑模式掩码
 } SmoothTarget;
 
 extern SmoothTarget smooth_target; // 声明全局平滑目标结构体

@@ -44,7 +44,7 @@
 /* 航向PID参数 */
 #define YAW_KP 0.5f                   /* 航向比例系数 */
 #define YAW_KD 0.5f                   /* 航向微分系数（无 I 项） */
-#define YAW_MAX_OUT 3.0f              /* 航向最大输出角速度 */
+#define YAW_MAX_OUT 15.0f              /* 航向最大输出角速度 */
 #define YAW_DEADBAND 3.0f             /* 航向死区阈值（度） */
 
 /* 动态调整幅度 */
@@ -58,7 +58,7 @@ s16 PID_ctrl[4] = {0};               /* 飞控输出数组，体坐标系 X/Y �
 PID_TypeDef pid_x, pid_y, pid_z, pid_yaw; /* 实例化 X/Y/Z/航向 PID 控制器 */
 
 // UWB 位置信息
-UWB_PosInfo uwb_pos_info = {         /* 初始化 UWB 位置信息结构体 */
+UWB_PosInfo uwb_pos_info = {         /* 初始化控制信息结构体 */
     .uwb_target_x = 0,               /* 目标 X 清零 */
     .uwb_target_y = 0,               /* 目标 Y 清零 */
     .uwb_target_z = 0,               /* 目标 Z 清零 */
@@ -144,6 +144,40 @@ void Get_Gen_Dis(void)
     if (abs16(raw_z - last_z) > 10) raw_z = last_z; /* 高度跳变超过 10cm 则丢弃 */
     uwb_pos_info.now_z = raw_z;      /* 更新当前高度 */
     last_z = raw_z;                  /* 记录本次高度作为基准 */
+}
+
+/**
+ * @brief  计算归一化角度误差（度），结果在 [-180, 180] 范围内
+ * @param  current_deg  当前角度（度）
+ * @param  target_deg   目标角度（度）
+ * @author camelliahm
+ * @return 角度误差（度），正值表示需要顺时针旋转（取决于你的坐标系正方向）
+ *         如果返回 0，表示已对齐（或无需控制）
+ */
+static float Angle_Error_Normalize(float current_deg, float target_deg)
+{
+    float error = target_deg - current_deg;
+
+    // 归一化到 [-180, 180]
+    while (error > 180.0f)  error -= 360.0f;
+    while (error < -180.0f) error += 360.0f;
+
+    return error;
+}
+
+/**
+ * @brief  世界坐标系速度指令 → 机体坐标系速度指令
+ * @param  yaw_rad  当前偏航角（弧度）
+ * @param  wx, wy   世界坐标系下的 X/Y 控制量
+ * @param  bx, by   输出机体坐标系下的 X/Y 控制量（指针传回）
+ * @author camelliahm
+ */
+static void WorldToBody(float yaw_rad, float wx, float wy, float *bx, float *by)
+{
+    float c = cosf(yaw_rad);
+    float s = sinf(yaw_rad);
+    *bx =  c * wx - s * wy;
+    *by =  s * wx + c * wy;
 }
 
 /**
@@ -245,7 +279,7 @@ void UWB_Position_PID(void)
 
     if (uwb_pos_info.pid_enable_flag == 0)  /* PID 未使能 */
     {                 
-        //Damping_Control();                       /* 进入阻尼模式 */
+        Damping_Control();                       /* 进入阻尼模式 */
         return;
     }
 
@@ -318,6 +352,7 @@ void Take_Off(u32 target_height)
  * @note   调用前需确保 uwb_pos_info 中的 now_x/now_y/now_z 已经是滤波后的值，
  *         uwb_target_x/y/z 已经设定好。
  *         该函数仅负责 PID 计算、坐标系旋转和限幅。
+ * @author camelliahm
  */
 void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
 {
@@ -344,8 +379,10 @@ void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
             PID_Calculate(&pid_y, uwb_pos_info.now_y, uwb_pos_info.uwb_target_y) : 0.0f;
 
         // 世界 → 机体
-        float out_x_body =  cos_y * out_x_world + sin_y * out_y_world;
-        float out_y_body = -sin_y * out_x_world + cos_y * out_y_world;
+        float out_x_body;
+        float out_y_body;
+
+        WorldToBody(yaw_rad, out_x_world, out_y_world, &out_x_body, &out_y_body);
 
         // 限幅
         out_x_body = CLAMP(out_x_body, -X_MAX_OUT, X_MAX_OUT);
@@ -380,10 +417,9 @@ void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
         if (uwb_pos_info.yaw_lock)
         {
             float current_yaw_deg = imu_angle * 57.2958f;
-            float yaw_err = uwb_pos_info.target_yaw_deg - current_yaw_deg;
-            while (yaw_err > 180.0f) yaw_err -= 360.0f;
-            while (yaw_err < -180.0f) yaw_err += 360.0f;
-            PID_ctrl[3] = (s16)PID_Calculate(&pid_yaw, current_yaw_deg, uwb_pos_info.target_yaw_deg);
+            float target_yaw_deg  = uwb_pos_info.target_yaw_deg;     // 读取锁定的目标角度
+            float yaw_err = Angle_Error_Normalize(current_yaw_deg, target_yaw_deg);
+            PID_ctrl[3] = -(s16)PID_Calculate(&pid_yaw, 0, yaw_err);
             PID_ctrl[3] = CLAMP(PID_ctrl[3], -YAW_MAX_OUT, YAW_MAX_OUT);
         }
         else

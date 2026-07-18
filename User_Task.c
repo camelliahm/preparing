@@ -7,13 +7,18 @@
 #include "math.h"
 #include "Ano_Math.h"
 #include "Drv_AnoOf.h"
-#include "grid_coord_mapping.h"
-#include "PathPlan.h"
 #include "My_smooth.h"
+#include "Patrol_Task.h"
+#include "My_Comm.h"
 
 // 静态变量记录当前所处阶段：0=官方起飞阶段，1=高度环阶段
 static uint8_t alt_stage = 0;
 static uint16_t stable_count = 0;   // 高度稳定计数
+static Cargo patrol_path[20];      // 定向盘点子路径数组
+static uint8_t patrol_path_len;    // 定向盘点路径长度、
+static u8 recognized_id; // 识别到的目标货物编号
+static u8 Fly = 0;
+static u8 flag = 0;
 
 void UserTask_OneKeyCmd(void)
 {
@@ -23,8 +28,8 @@ void UserTask_OneKeyCmd(void)
     //用静态变量记录一键起飞/降落指令已经执行。
     static u8 one_key_takeoff_f = 1, one_key_land_f = 1, one_key_mission_f = 0;
     static u8 mission_step;
-    static u16 time_dly_cnt_ms;
-    static u8 path_init = 0;
+    static u32 time_dly_cnt_ms;
+
     //判断有遥控信号才执行
     if (rc_in.fail_safe == 0)
     {
@@ -37,7 +42,7 @@ void UserTask_OneKeyCmd(void)
                 //标记已经执行
                 one_key_takeoff_f =
                     //执行一键起飞
-                    OneKey_Takeoff(110); //参数单位：厘米； 0：默认上位机设置的高度。
+                    OneKey_Takeoff(130); //参数单位：厘米； 0：默认上位机设置的高度。
             }
         }
         else
@@ -120,36 +125,63 @@ void UserTask_OneKeyCmd(void)
                     if (ano_of.of_alt_cm > 108 && ano_of.of_alt_cm < 115)
                     {
                         // mission_step += 1;
-                        uwb_pos_info.axis_mask = DRONE_AXIS_Z; // 全轴控制
+                        uwb_pos_info.axis_mask = DRONE_AXIS_ALL; // 全轴控制
 
-                        if (time_dly_cnt_ms<100000)
+                        if (time_dly_cnt_ms<100000)//！！！！！！！！！！！！！！超大延时（仅调试使用）
                         {
                             time_dly_cnt_ms+=20;//ms
                         }
                         else
                         {
-                            mission_step += 1;
+                            time_dly_cnt_ms = 0;
+                            if (ground_data.mission == 1)
+                            {
+                                mission_step = 5;
+                            }
+                            else if(ground_data.mission == 2)
+                            {
+                                mission_step = 6;
+                            }
                         }
                     }
                 }
                 break;
                 case 5:
                 {
-                    if (!path_init)
+                    if (Patrol_Task(Goods_list, 36, 5000))
                     {
-                        path_exec_init();
-                        path_coord_to_target_coord();
-                        path_init = 1;
+                        mission_step = 8;
                     }
-                    mission_step += 1;
-                }
-                break;
-                case 6:
-                {
-                   mission_step += path_exec_step();
                 }
                 break;
                 
+                case 6:
+                {
+                    if (DirectedPath_map(vision_data.number, &recognized_id))
+                    {
+                        patrol_path_len = DirectedPath_Build(recognized_id, patrol_path);
+                        mission_step = 7;
+                    }
+                }
+                break;
+                case 7:
+                {
+                    if (Patrol_Task(patrol_path, patrol_path_len, 5000))
+                    {
+                        mission_step = 8;
+                    }
+                }
+                break;
+                case 8:
+                {
+                    mission_step += OneKey_Land();
+                }
+                break;
+                case 9:
+                {
+                    mission_step += FC_Lock();
+                }
+                break;
                 default:
                 break;
             }
@@ -175,7 +207,7 @@ void MyTask(void)
             // PID 对象, 输出限幅, 积分限幅, 死区, Kp, Ki, Kd, 变积分A, 变积分B, 输出滤波, 微分滤波, 功能按位组合
             PID_Init(&pid_x , 20 , 8 , 2.0f , 0.6f , 0.0025f , 0.06f , 9.0f , 3.0f , 0.3f , 0.3f , Integral_Limit | ChangingIntegralRate | DerivativeFilter | OutputFilter | Fallback_Diff | Derivative_On_Measurement);
             PID_Init(&pid_y , 20 , 8 , 2.0f , 0.6f , 0.0025f , 0.06f , 9.0f , 3.0f , 0.3f , 0.3f , Integral_Limit | ChangingIntegralRate | DerivativeFilter | OutputFilter | Fallback_Diff | Derivative_On_Measurement);
-            PID_Init(&pid_yaw, 3.0f , 0 , 3 , 0.50f , 0 , 0.50f , 0 , 0 , 0.3f , 0.3f , OutputFilter);
+            PID_Init(&pid_yaw, 15.0f , 0 , 3 , 0.50f , 0 , 0.50f , 0 , 0 , 0.3f , 0.3f , OutputFilter);
             PID_Init(&pid_z,   40 , 10 , 2.0f , 0.80f , 0.002f , 0.03f , 15 , 5 , 0.2f , 0.2f , Integral_Limit | ChangingIntegralRate | DerivativeFilter | OutputFilter | Fallback_Diff);
         }
 
@@ -209,10 +241,10 @@ void MyTask(void)
         if (alt_stage == 0)
         {
             // 调用官方起飞函数
-            OneKey_Takeoff(110);
-
+            //OneKey_Takeoff(110);
+            Take_Off(110);
             // 检测高度是否稳定在目标附近
-            if (ano_of.of_alt_cm > 78 && ano_of.of_alt_cm < 85)
+            if (ano_of.of_alt_cm > 108 && ano_of.of_alt_cm < 115)
             {
                 stable_count++;
             }
@@ -227,11 +259,12 @@ void MyTask(void)
                 pid_z.Iout     = 0.0f;
                 pid_z.ITerm    = 0.0f;
                 pid_z.Last_Err = 0.0f;
-                pid_z.Target   = 80.0f;
+                pid_z.Target   = 110.0f;
 
                 // 初始化平滑起点为当前 UWB 坐标
                 smooth_target.smooth_x = uwb_pos_info.now_x;
                 smooth_target.smooth_y = uwb_pos_info.now_y;
+                Set_Smooth_Target(uwb_pos_info.uwb_target_x, uwb_pos_info.uwb_target_y, 0.0f, 0);
 
                 // 锁定航向
                 uwb_pos_info.yaw_lock = 1;
@@ -244,11 +277,30 @@ void MyTask(void)
         else   // alt_stage == 1，正常控制阶段
         {
             // 设置高度目标（全轴和仅Z轴模式都使用）
-            uwb_pos_info.uwb_target_z = 80;
+            uwb_pos_info.uwb_target_z = 130;
+
+            if (Fly == 0)
+            {
+                uwb_pos_info.uwb_target_x += 200;
+                Fly = 1;
+            }
+
+            if (ABS(uwb_pos_info.uwb_target_x - uwb_pos_info.now_x) <= 5 && ABS(uwb_pos_info.uwb_target_y - uwb_pos_info.now_y) <= 5 && flag == 0)
+            {
+                uwb_pos_info.axis_mask = DRONE_AXIS_ALL;
+                uwb_pos_info.target_yaw_deg = 90.0f;
+                flag = 1;
+            }
+
+            if (my_abs(uwb_pos_info.target_yaw_deg - imu_angle * 57.2958f) <= 1 && flag == 1)
+            {
+                uwb_pos_info.axis_mask = DRONE_AXIS_ALL;
+                uwb_pos_info.uwb_target_y -= 200;
+                flag = 2;
+            }
 
             // 调用统一控制更新函数
-            Drone_Control_Update(uwb_pos_info.axis_mask, SMOOTH_NONE);
+            //Drone_Control_Update(uwb_pos_info.axis_mask, SMOOTH_NONE);
         }
     }
 }
-

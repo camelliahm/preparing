@@ -14,7 +14,7 @@ SmoothTarget smooth_target = {0}; // 初始化平滑目标结构体
  * @param  new_x        最终目标X坐标 (cm)
  * @param  new_y        最终目标Y坐标 (cm)
  * @param  speed_cm_s   平滑移动速度 (cm/s)，例如 40.0f
- * @param  active       是否激活平滑移动，1: 激活, 0: 不激活
+ * @author camelliahm
  */
 void Set_Smooth_Target(float new_x, float new_y, float speed_cm_s, uint8_t active)
 {
@@ -27,10 +27,16 @@ void Set_Smooth_Target(float new_x, float new_y, float speed_cm_s, uint8_t activ
 /**
  * @brief  每控制周期调用一次，更新平滑目标值
  * @note   应在 MyTask 的全轴 PID 分支中、设置 uwb_target 之前调用
+ * @author camelliahm
  */
 void Update_Smooth_Target(u8 mode)
 {
-    if (!smooth_target.smoothing_active) return;
+    if (!smooth_target.smoothing_active) 
+    {
+        smooth_target.smooth_x = smooth_target.final_x;
+        smooth_target.smooth_y = smooth_target.final_y;
+        return;
+    }
 
     // 每周期步长 = 速度 (cm/s) × 控制周期 (s)
     const float dt = 0.02f;
@@ -91,6 +97,7 @@ void Update_Smooth_Target(u8 mode)
 /**
  * @brief  查询是否已到达最终目标
  * @return 1: 已到达, 0: 移动中或未激活
+ * @author camelliahm
  */
 uint8_t Is_Target_Reached(void)
 {
