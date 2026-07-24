@@ -4,6 +4,49 @@
 #include "stm32f4xx.h"          
 #include "PID_Mod.h"            
 
+#define USE_LEGACY_CONTROL          0       //新旧PID控制开关
+#define DAMPING_CONTROL             1       //阻尼控制开关
+#define ADJUST_DYNAMIC_PARAMS       1       //运动状态动态调整参数开关
+
+/* 常量定义 */
+#define DEG_TO_RAD      (PI / 180.0f) /* 角度转弧度因子 */
+#define DAMP_GAIN 0.8                /* 阻尼控制增益 */
+#define MAX_SPEED 20                  /* 最大允许输出速度 */
+
+/* X轴PID 参数 */
+#define X_KP  0.60f                  /* X 轴比例系数 */
+#define X_KI  0.0f                 /* X 轴积分系数 */
+#define X_KD  0.2f                  /* X 轴微分系数 */
+#define X_MAX_OUT 15              /* X 轴最大输出幅值 */
+#define X_INT_LIM 8              /* X 轴积分限幅 */
+#define X_DEADBAND 2.0f              /* X 轴死区阈值 */
+
+/* Y轴PID参数 */
+#define Y_KP  0.60f                  /* Y 轴比例系数 */
+#define Y_KI  0.0f                 /* Y 轴积分系数 */
+#define Y_KD  0.2f                  /* Y 轴微分系数 */
+#define Y_MAX_OUT 15              /* Y 轴最大输出幅值 */
+#define Y_INT_LIM 8              /* Y 轴积分限幅 */
+#define Y_DEADBAND 2.0f              /* Y 轴死区阈值 */
+
+/* Z轴PID参数 */
+#define Z_KP   0.8f                   /* Z 轴比例系数 */
+#define Z_KI   0.002f                 /* Z 轴积分系数 */
+#define Z_KD   0.03f                  /* Z 轴微分系数 */
+#define Z_MAX_OUT  40              /* Z 轴最大输出幅值 */
+#define Z_INT_LIM  10              /* Z 轴积分限幅 */
+#define Z_DEADBAND 2.0f               /* Z 轴死区阈值 */
+
+/* 航向PID参数 */
+#define YAW_KP 0.5f                   /* 航向比例系数 */
+#define YAW_KD 0.5f                   /* 航向微分系数（无 I 项） */
+#define YAW_MAX_OUT 3.0f              /* 航向最大输出角速度 */
+#define YAW_DEADBAND 3.0f             /* 航向死区阈值（度） */
+
+/* 动态调整幅度 */
+#define DYN_KD_BOOST  1.5f            /* 运动时微分增益放大倍数 */
+#define DYN_KI_REDUCE 0.3f            /* 运动时积分增益缩小倍数 */
+
 /* UWB 位置信息结构体 */
 typedef struct
 {
