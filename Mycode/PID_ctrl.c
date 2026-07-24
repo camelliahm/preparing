@@ -11,45 +11,7 @@
 #include "LX_FC_EXT_Sensor.h"
 #include "My_smooth.h"  
 
-/* 常量定义 */
 #define PI 3.14159265f                /* 圆周率 */
-#define DEG_TO_RAD      (PI / 180.0f) /* 角度转弧度因子 */
-#define DAMP_GAIN 0.8                /* 阻尼控制增益 */
-#define MAX_SPEED 20                  /* 最大允许输出速度 */
-
-/* X轴PID 参数 */
-#define X_KP  0.60f                  /* X 轴比例系数 */
-#define X_KI  0.0025f                 /* X 轴积分系数 */
-#define X_KD  0.06f                  /* X 轴微分系数 */
-#define X_MAX_OUT 20              /* X 轴最大输出幅值 */
-#define X_INT_LIM 8              /* X 轴积分限幅 */
-#define X_DEADBAND 2.0f              /* X 轴死区阈值 */
-
-/* Y轴PID参数 */
-#define Y_KP  0.60f                  /* Y 轴比例系数 */
-#define Y_KI  0.0025f                 /* Y 轴积分系数 */
-#define Y_KD  0.06f                  /* Y 轴微分系数 */
-#define Y_MAX_OUT 20              /* Y 轴最大输出幅值 */
-#define Y_INT_LIM 8              /* Y 轴积分限幅 */
-#define Y_DEADBAND 2.0f              /* Y 轴死区阈值 */
-
-/* Z轴PID参数 */
-#define Z_KP   0.8f                   /* Z 轴比例系数 */
-#define Z_KI   0.002f                 /* Z 轴积分系数 */
-#define Z_KD   0.03f                  /* Z 轴微分系数 */
-#define Z_MAX_OUT  40              /* Z 轴最大输出幅值 */
-#define Z_INT_LIM  10              /* Z 轴积分限幅 */
-#define Z_DEADBAND 2.0f               /* Z 轴死区阈值 */
-
-/* 航向PID参数 */
-#define YAW_KP 0.5f                   /* 航向比例系数 */
-#define YAW_KD 0.5f                   /* 航向微分系数（无 I 项） */
-#define YAW_MAX_OUT 3.0f              /* 航向最大输出角速度 */
-#define YAW_DEADBAND 3.0f             /* 航向死区阈值（度） */
-
-/* 动态调整幅度 */
-#define DYN_KD_BOOST  2.0f            /* 运动时微分增益放大倍数 */
-#define DYN_KI_REDUCE 0.3f            /* 运动时积分增益缩小倍数 */
 
 // 顺序：vel_x, vel_y, vel_z, yaw_dps
 s16 PID_ctrl[4] = {0};               /* 飞控输出数组，体坐标系 X/Y 速度、Z 速度、偏航角速度 */
@@ -58,7 +20,7 @@ s16 PID_ctrl[4] = {0};               /* 飞控输出数组，体坐标系 X/Y �
 PID_TypeDef pid_x, pid_y, pid_z, pid_yaw; /* 实例化 X/Y/Z/航向 PID 控制器 */
 
 // UWB 位置信息
-UWB_PosInfo uwb_pos_info = {         /* 初始化 UWB 位置信息结构体 */
+UWB_PosInfo uwb_pos_info = {         /* 初始化控制信息结构体 */
     .uwb_target_x = 0,               /* 目标 X 清零 */
     .uwb_target_y = 0,               /* 目标 Y 清零 */
     .uwb_target_z = 0,               /* 目标 Z 清零 */
@@ -106,8 +68,6 @@ void Get_UWB_Pos(void)
             {
                 uwb_pos_info.uwb_target_x = raw_x; /* 锁定当前 X 坐标作为目标 */
                 uwb_pos_info.uwb_target_y = raw_y; /* 锁定当前 Y 坐标作为目标 */
-                //uwb_pos_info.uwb_target_x = 90.0f;
-                //uwb_pos_info.uwb_target_y = 280.0f;
                 last_x = raw_x;      /* 记录当前有效坐标，供后续跳变保护使用 */
                 last_y = raw_y;
                 uwb_pos_info.target_init_done = 1; /* 标记初始化完成 */
@@ -147,28 +107,106 @@ void Get_Gen_Dis(void)
 }
 
 /**
- * @brief 阻尼模式控制：当 PID 未使能时，利用光流速度反馈产生阻尼力
- *        目的是抑制无人机在外部干扰下的漂移
+ * @brief  计算归一化角度误差（度），结果在 [-180, 180] 范围内
+ * @param  current_deg  当前角度（度）
+ * @param  target_deg   目标角度（度）
+ * @author camelliahm
+ * @return 角度误差（度），正值表示需要顺时针旋转（取决于你的坐标系正方向）
+ *         如果返回 0，表示已对齐（或无需控制）
+ */
+static float Angle_Error_Normalize(float current_deg, float target_deg)
+{
+    float error = target_deg - current_deg;
+
+    // 归一化到 [-180, 180]
+    while (error > 180.0f)  error -= 360.0f;
+    while (error < -180.0f) error += 360.0f;
+
+    return error;
+}
+
+/**
+ * @brief  世界坐标系速度指令 → 机体坐标系速度指令
+ * @param  yaw_rad  当前偏航角（弧度）
+ * @param  wx, wy   世界坐标系下的 X/Y 控制量
+ * @param  bx, by   输出机体坐标系下的 X/Y 控制量（指针传回）
+ * @author camelliahm
+ */
+static void WorldToBody(float yaw_rad, float wx, float wy, float *bx, float *by)
+{
+    float c = cosf(yaw_rad);
+    float s = sinf(yaw_rad);
+    *bx =  c * wx - s * wy;
+    *by =  s * wx + c * wy;
+}
+
+#if DAMPING_CONTROL
+
+/**
+ * @brief 阻尼模式下的主动位置保持控制
+ * 
+ * 本质是一个以起飞点为原点、仅依赖光流速度积分的简易 P + D 位置环：
+ *   - 目标值恒为 0（即起飞原点），
+ *   - 当前位置由光流速度积分得到，
+ *   - P 项（回中力） = 比例增益 × 位移（带 ±3 cm 死区，防止小偏差抖动），
+ *   - D 项（速度阻尼） = 微分增益 × 光流速度（刹车，防止回中过冲）。
+ * 
+ * 该函数在 PID 未使能（如 UWB 未锁定）或起飞阶段时被调用，
+ * 用于抵抗外部扰动、抑制漂移，并为后续切入完整位置环提供平滑过渡。
+ * 
  * @author camelliahm
  */
 static void Damping_Control(void)
 {
-    static float filt_spd_x = 0, filt_spd_y = 0; /* 滤波后的速度值，增加阻尼控制的平滑性 */
-    float spd_x = -ano_of.of2_dx * 0.8f;   /* 获取光流 X 方向速度，并缩放到合适量纲 */
-    float spd_y = -ano_of.of2_dy * 0.8f;   /* 获取光流 Y 方向速度 */
+    static float filt_out_x = 0, filt_out_y = 0; /* 滤波后的速度值，增加阻尼控制的平滑性 */
+    static float integral_x = 0, integral_y = 0; /* 积分项，用于计算相对位移 */
 
-    filt_spd_x = 0.4f * ano_of.of2_dx * 0.8f + 0.6f * filt_spd_x;
-    filt_spd_y = 0.4f * ano_of.of2_dy * 0.8f + 0.6f * filt_spd_y;
+    // 1. 获取光流速度 (惯导融合后，噪声小)
+    float spd_x = ano_of.of2_dx_fix;   /* 获取光流 X 方向速度 */
+    float spd_y = ano_of.of2_dy_fix;   /* 获取光流 Y 方向速度 */
 
-    filt_spd_x = CLAMP(filt_spd_x, -12, 12);      /* X 阻尼输出限幅 ±12 */
-    filt_spd_y = CLAMP(filt_spd_y, -12, 12);      /* Y 阻尼输出限幅 ±12 */
+    // 2. 速度积分，计算相对位移 (单位: cm)
+    // 0.02f 是控制周期 (50Hz)，表示每20ms积分一次
+    integral_x += spd_x * 0.02f; /* 积分计算相对位移 */
+    integral_y += spd_y * 0.02f; /* 积分计算相对位移 */
 
-    PID_ctrl[0] = (s16)filt_spd_x;            /* 将阻尼量写入 X 速度输出 */
-    PID_ctrl[1] = (s16)filt_spd_y;            /* 将阻尼量写入 Y 速度输出 */
-    PID_ctrl[2] = 0;                      /* Z 输出置零 */
+    // 3. 积分限幅，防止积分饱和 (限制回中力最大作用范围)
+    integral_x = CLAMP(integral_x, -20, 20); /* 积分限幅 ±20cm */
+    integral_y = CLAMP(integral_y, -20, 20); /* 积分限幅 ±20cm */
+
+    // 4. 积分死区：位移很小时不产生回中力，避免在原点附近往复震荡
+    float out_x = 0.0f, out_y = 0.0f;
+    if (fabsf(integral_x) > 3.0f)
+    {
+        out_x = -0.6f * integral_x; /* 当位移超过 3cm 时，产生回中力 */
+    }
+    if (fabsf(integral_y) > 3.0f)
+    {
+        out_y = -0.6f * integral_y; /* 当位移超过 3cm 时，产生回中力 */
+    }
+
+    // 5. 叠加被动速度阻尼，提供“刹车”效果
+    out_x -= 1.2f * spd_x;
+    out_y -= 1.2f * spd_y;
+
+    // 6. 对最终输出进行滤波和限幅，确保控制量平滑且不超限
+    filt_out_x = 0.3f * out_x + 0.7f * filt_out_x;
+    filt_out_y = 0.3f * out_y + 0.7f * filt_out_y;
+
+    filt_out_x = CLAMP(filt_out_x, -12.0f, 12.0f);      /* X 阻尼输出限幅 ±12 */
+    filt_out_y = CLAMP(filt_out_y, -12.0f, 12.0f);      /* Y 阻尼输出限幅 ±12 */
+
+    // 7. 输出并清理其他轴
+    PID_ctrl[0] = (s16)filt_out_x;            /* 将阻尼量写入 X 速度输出 */
+    PID_ctrl[1] = (s16)filt_out_y;            /* 将阻尼量写入 Y 速度输出 */
+    //PID_ctrl[2] = 0;                      /* Z 输出置零 */
     PID_ctrl[3] = 0;                      /* 航向输出置零 */
     pid_x.Iout = pid_y.Iout = pid_z.Iout = 0; /* 清除各 PID 积分项，避免切换时跳变 */
 }
+
+#endif
+
+#if ADJUST_DYNAMIC_PARAMS
 
 /**
  * @brief 根据运动状态动态调整 PID 参数
@@ -177,22 +215,30 @@ static void Damping_Control(void)
  */
 static void Adjust_Dynamic_Params(void)
 {
-    if (uwb_pos_info.is_moving_y) {                           /* Y 轴正在运动 */
+    if (uwb_pos_info.is_moving_y) 
+    {                           /* Y 轴正在运动 */
         pid_x.Kd = X_KD * DYN_KD_BOOST;         /* 增大 X 轴 PID 的微分项 */
         pid_x.Ki = X_KI * DYN_KI_REDUCE;        /* 减小 X 轴 PID 的积分项 */
-    } else {
+    } 
+    else 
+    {
         pid_x.Kd = X_KD;                        /* 恢复默认微分 */
         pid_x.Ki = X_KI;                        /* 恢复默认积分 */
     }
 
-    if (uwb_pos_info.is_moving_x) {                           /* X 轴正在运动 */
+    if (uwb_pos_info.is_moving_x) 
+    {                           /* X 轴正在运动 */
         pid_y.Kd = Y_KD * DYN_KD_BOOST;         /* 增大 Y 轴 PID 的微分项 */
         pid_y.Ki = Y_KI * DYN_KI_REDUCE;        /* 减小 Y 轴 PID 的积分项 */
-    } else {
+    } 
+    else 
+    {
         pid_y.Kd = Y_KD;                        /* 恢复默认微分 */
         pid_y.Ki = Y_KI;                        /* 恢复默认积分 */
     }
 }
+
+#endif
 
 /**
  * @brief 初始化所有 PID 控制器及相关变量
@@ -205,13 +251,13 @@ void Drone_PID_Init(void)
     PID_Init(&pid_x, X_MAX_OUT, X_INT_LIM, X_DEADBAND,
              X_KP, X_KI, X_KD,
              9.0f, 3.0f, 0.3f, 0.3f,            /* 变积分参数(A,B)、微分滤波器因子、输出滤波器因子 */
-             Integral_Limit | ChangingIntegralRate | DerivativeFilter | OutputFilter | Fallback_Diff | Derivative_On_Measurement);
+              DerivativeFilter | Fallback_Diff);
 
     // 初始化 Y 轴 PID：配置与 X 轴相同
     PID_Init(&pid_y, Y_MAX_OUT, Y_INT_LIM, Y_DEADBAND,
              Y_KP, Y_KI, Y_KD,
              9.0f, 3.0f, 0.3f, 0.3f,
-             Integral_Limit | ChangingIntegralRate | DerivativeFilter | OutputFilter | Fallback_Diff | Derivative_On_Measurement);
+              DerivativeFilter| Fallback_Diff);
 
     // 初始化 Z 轴 PID：死区、限幅与 X/Y 不同，使用高度控制参数
     PID_Init(&pid_z, Z_MAX_OUT, Z_INT_LIM, Z_DEADBAND,
@@ -233,6 +279,21 @@ void Drone_PID_Init(void)
 }
 
 /**
+ * @brief 起飞控制函数，设定目标高度并立刻开始 Z 轴控制
+ * @author camelliahm
+ * @param target_height 目标高度（厘米）
+ */
+void Take_Off(u32 target_height)
+{
+    uwb_pos_info.uwb_target_z = target_height;   /* 更新目标高度 */
+    Get_Gen_Dis();                               /* 获取当前高度 */
+    pid_z.Target = target_height;                /* 设置 Z 轴 PID 目标 */
+    PID_ctrl[2] = (s16)PID_Calculate(&pid_z, uwb_pos_info.now_z, target_height); /* 计算并输出 Z 轴控制量 */
+}
+
+#if USE_LEGACY_CONTROL
+
+/**
  * @brief UWB 位置 PID 主控制循环
  *        读取传感器数据，根据使能状态执行阻尼或位置闭环控制
  *       包含坐标系转换、动态参数调整、异常数据处理等功能
@@ -245,7 +306,7 @@ void UWB_Position_PID(void)
 
     if (uwb_pos_info.pid_enable_flag == 0)  /* PID 未使能 */
     {                 
-        //Damping_Control();                       /* 进入阻尼模式 */
+        Damping_Control();                       /* 进入阻尼模式 */
         return;
     }
 
@@ -298,18 +359,7 @@ void UWB_Position_PID(void)
     }
 }
 
-/**
- * @brief 起飞控制函数，设定目标高度并立刻开始 Z 轴控制
- * @author camelliahm
- * @param target_height 目标高度（厘米）
- */
-void Take_Off(u32 target_height)
-{
-    uwb_pos_info.uwb_target_z = target_height;   /* 更新目标高度 */
-    Get_Gen_Dis();                               /* 获取当前高度 */
-    pid_z.Target = target_height;                /* 设置 Z 轴 PID 目标 */
-    PID_ctrl[2] = (s16)PID_Calculate(&pid_z, uwb_pos_info.now_z, target_height); /* 计算并输出 Z 轴控制量 */
-}
+#else
 
 /**
  * @brief  无人机多轴位置/姿态控制更新
@@ -318,14 +368,22 @@ void Take_Off(u32 target_height)
  * @note   调用前需确保 uwb_pos_info 中的 now_x/now_y/now_z 已经是滤波后的值，
  *         uwb_target_x/y/z 已经设定好。
  *         该函数仅负责 PID 计算、坐标系旋转和限幅。
+ * @author camelliehm
  */
 void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
 {
     Get_UWB_Pos();                               /* 获取并处理 UWB 数据 */
     Get_Gen_Dis();                               /* 获取并处理高度数据 */
 
+    if (uwb_pos_info.now_z < 108 || uwb_pos_info.now_z > 115)
+    {
+        Damping_Control();                       /* 高度在 108~115cm 时启用阻尼控制 */
+        return;
+    }
 
-    float yaw_rad = imu_angle;
+    Adjust_Dynamic_Params();
+
+    float yaw_rad = imu_angle - 1.5708f;  // - π/2
     float cos_y = cosf(yaw_rad);
     float sin_y = sinf(yaw_rad);
 
@@ -344,8 +402,10 @@ void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
             PID_Calculate(&pid_y, uwb_pos_info.now_y, uwb_pos_info.uwb_target_y) : 0.0f;
 
         // 世界 → 机体
-        float out_x_body =  cos_y * out_x_world + sin_y * out_y_world;
-        float out_y_body = -sin_y * out_x_world + cos_y * out_y_world;
+        float out_x_body;
+        float out_y_body;
+
+        WorldToBody(yaw_rad, out_x_world, out_y_world, &out_x_body, &out_y_body);
 
         // 限幅
         out_x_body = CLAMP(out_x_body, -X_MAX_OUT, X_MAX_OUT);
@@ -380,10 +440,9 @@ void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
         if (uwb_pos_info.yaw_lock)
         {
             float current_yaw_deg = imu_angle * 57.2958f;
-            float yaw_err = uwb_pos_info.target_yaw_deg - current_yaw_deg;
-            while (yaw_err > 180.0f) yaw_err -= 360.0f;
-            while (yaw_err < -180.0f) yaw_err += 360.0f;
-            PID_ctrl[3] = (s16)PID_Calculate(&pid_yaw, current_yaw_deg, uwb_pos_info.target_yaw_deg);
+            float target_yaw_deg  = uwb_pos_info.target_yaw_deg;     // 读取锁定的目标角度
+            float yaw_err = Angle_Error_Normalize(current_yaw_deg, target_yaw_deg);
+            PID_ctrl[3] = -(s16)PID_Calculate(&pid_yaw, 0, yaw_err);
             PID_ctrl[3] = CLAMP(PID_ctrl[3], -YAW_MAX_OUT, YAW_MAX_OUT);
         }
         else
@@ -397,3 +456,5 @@ void Drone_Control_Update(uint8_t axis_mask, uint8_t smooth_mode)
         pid_yaw.Iout = 0;
     }
 }
+
+#endif
